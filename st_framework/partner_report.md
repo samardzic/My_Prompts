@@ -1,0 +1,262 @@
+# Partner APIs Test Automation Framework: Technical Review
+
+**Scope:** `app/`, `Utils/`, `TestData/`, `conftest.py`, `Tests/**/conftest.py`, `run_tests.py`, `pytest.ini`, `options.json`, `requirements.txt`, plus a sample of test modules. Generated protobuf code (`app/proto/`) was excluded.
+**Method:** Static inspection only. No dependencies were installed and nothing was executed, so runtime claims are marked as *potential risk* where they could not be confirmed.
+**Classification used:** **[Defect]** = confirmed from code; **[Risk]** = likely problem depending on runtime or config; **[Improvement]** = optional quality gain.
+
+---
+
+## 1. Executive summary
+
+The framework is a pytest-based REST/protobuf API test suite. It has 170 test files and about 1,080 test functions, and it covers Partner, User (VPN), Config, Objects, Pango Auth/2FA, and Discovery services across Dev, Stage, and Prod. It has a sensible core idea: a `BaseAPI → HttpRequests` client layer with OpenAPI request/response validation, adaptive retry and back-off, secret sanitization, ReportPortal/Slack reporting, and a parallel per-folder runner.
+
+The engineering quality around that core is uneven:
+
+- **Several confirmed defects in framework plumbing**:
+  - The deferred-log replay never fires.
+  - The DelayTests "run after" step points at a non-existent path.
+  - `--ci true` crashes on a missing attribute.
+  - A form-encoded + encryption branch raises `TypeError`.
+  - Two `func_*` fixtures use the wrong (shared) dependency.
+  - The CLI `--environment` option is silently overridden by an environment variable.
+- **Shared mutable state** (instance headers, the module-level `testData`, session-scoped clients, global counters) undermines test isolation, especially when `-m smoke_prod` promotes fixtures to session scope.
+- **Heavy duplication**: the `func_*`/non-`func_*` fixture twins, six near-identical partner login fixtures, two coexisting API layers (`app/api.py` legacy and `app/api_new.py`), and repeated validation and URL logic.
+- **Reliability masking**: a blanket 25-attempt/300 s retry loop (including on `OAUTH_ERROR`), 101 hard sleeps (up to 905 s), 160 skips (48 with reason "TBD" or "Skipped till further investigation"), and a runner that exits 0 on failures by default and ignores subprocess exit codes.
+
+**Maturity: Level 2 (Basic), with some Level 3 elements.** Section 8 explains the rating.
+
+---
+
+## 2. Framework architecture
+
+```
+run_tests.py            ── spawns one `pytest` subprocess per top-level Tests/ folder (threads), merges JSON, RP, Slack
+conftest.py (root)      ── env loading, CLI options (options.json), RP/Jira config, logging hooks, testData, fsec/totalsecurity mocks
+Tests/conftest.py       ── API client fixtures, VPN-user auth-method matrix (pytest_generate_tests)
+Tests/<Area>/conftest.py── area-specific fixtures (12 files)
+app/
+  http_wrapper.py       ── HttpRequests (request, retry, schema validation), DelayManager
+  base_api.py           ── BaseAPI(HttpRequests) + HostDetails (geo-IP lookup)
+  api_new.py            ── UserAPI, PartnerAPI, ObjectsAPI, ConfigAPI, Auth(5-way MI), AuthTestUser
+  api_auth.py           ── PangoUser / PangoSession / PangoPublic / PangoGrant / PangoGateway mixins
+  api.py                ── LEGACY Session-based clients (1,126 lines), still imported by 3 files
+  logger.py             ── CustomLogger singleton, custom levels, curl.txt writer
+  elite_auth.py, tokens.py, Slack_Info.py, jiraTicket.py
+Utils/                  ── sanitization, RP logger, encryption, email/IMAP 2FA, comparison
+TestData/               ── per-env Python modules (DevTestData/StageTestData/ProdTestData)
+```
+
+**Strengths**
+- There is a clear client abstraction: tests call `partner_authenticated.make_request(...)` or domain methods such as `UserAPI.provide()`. Schema validation and logging happen centrally in `HttpRequests.make_request` ([app/http_wrapper.py:273](app/http_wrapper.py#L273)).
+- Test data is separated per environment, and tests are organized by service and endpoint, with `# ENDPOINT - ...` headers.
+- The auth-method matrix is parametrized through `pytest_generate_tests` ([Tests/conftest.py:322](Tests/conftest.py#L322)), so one test runs against anonymous, test, elite, and other auth methods.
+
+**Weaknesses**
+- **Two parallel API layers.** `app/api.py` (legacy `requests.Session` + `OpenAPIAdapter`) coexists with `app/api_new.py`. Both are live: `Tests/conftest.py:11` imports `ExceptionCollector` from the legacy module, and so do `test_files_upload.py` and `test_subscribers_put.py`. Constructing a legacy `PartnerAPI` also truncates `curl.txt` ([app/api.py:83](app/api.py#L83)).
+- **Inverted dependencies.** The `app` layer imports from tests (`from Tests.ObjectAPI.encode_base64 import ...` at [app/api_new.py:9](app/api_new.py#L9)). One test module imports from another test module (`Tests/Partner/Subscribers/test_put_subscribers_by_user_id.py:17` imports from `Tests.User.Login.test_fields_cardinality_and_mapping`). `http_wrapper` and `elite_auth` borrow the logger from `Utils.email_utils`.
+- **Wildcard import** (`from app.api_auth import *`, [app/api_new.py:11](app/api_new.py#L11)) is how `BaseAPI`, `requests`, and `Union` reach `api_new`.
+- **`sys.path` manipulation** at import time ([app/elite_auth.py:15](app/elite_auth.py#L15)).
+- **Dependency hygiene.** `requirements.txt` duplicates pins (`selenium`, `jsondiff`, `certifi`, `charset-normalizer`), leaves several packages unpinned (`pytest-reportportal`, `protobuf`, `pytest-rerunfailures`, ...), and omits directly imported `jsonschema`. It also ships tooling that test runs don't need (`selenium`, `chromedriver_autoinstaller`, used only by `Utils/createTestRailTCs.py`).
+- Nothing in the repo provides lint, formatting, type-check, or CI configuration, and the framework code itself has no unit tests.
+
+---
+
+## 3. Logging and reporting
+
+**Design.** `CustomLogger` is a singleton ([app/logger.py:20](app/logger.py#L20)) with nine custom levels (21–29: NOTIFY, REQUEST, RESPONSE, AUTH, TEST, LINE, EXCEPTION, REASON, HEADER) and a colored console handler. Request/response pairs go to `curl.txt` and to the ReportPortal logger after sanitization (`Utils/utils.py: log_request_response_to_rp_info`). Failures are parsed from `longrepr` into line/exception/reason ([app/logger.py:126](app/logger.py#L126)).
+
+**Findings**
+
+| # | Type | Finding |
+|---|---|---|
+| L1 | **[Defect]** | **Deferred log replay never runs.** With `live_logging=false`, `log_message` buffers to `log_history` ([logger.py:121-124](app/logger.py#L121-L124)), but `process_log_history` only acts when `live_logging` is true ([logger.py:88](app/logger.py#L88)). With `live_logging=true`, nothing is buffered and `add_test_status('failed')` is a no-op because the key doesn't exist ([logger.py:209](app/logger.py#L209)). Result: in quiet mode, all framework logs, including for failing tests, are silently dropped, and `log_history` grows for the whole session. |
+| L2 | **[Defect]** | `pytest_runtest_makereport` overwrites `report.nodeid` with the test docstring ([conftest.py:198-206](conftest.py#L198-L206)). Node IDs become free text (often multi-line), which breaks `get_test_details`' `split("::")[-2]` ([conftest.py:268](conftest.py#L268), giving `IndexError`) and confuses JSON reports, rerun bookkeeping, and RP item identity. Use `report.user_properties` or an RP description attribute instead. |
+| L3 | **[Defect]** | `DelayManager.__init__` logs a literal `"{self.current_delay}"` because the `f` prefix is missing ([http_wrapper.py:39](app/http_wrapper.py#L39)). |
+| L4 | **[Defect]** | On macOS (`Darwin`), files are written to `f'{root}\\curl.txt'` and `f'{root}\per_test_curl.txt'` ([logger.py:36,181,191](app/logger.py#L36)). Backslashes are not separators on POSIX, so this creates oddly named files in the parent directory. `per_test_curl.txt` is never truncated. Use `Path(root) / "curl.txt"`. |
+| L5 | **[Risk]** | Under `run_tests.py` parallel mode, multiple pytest processes append to and truncate the same `curl.txt` concurrently: root `pytest_sessionstart` truncates it ([conftest.py:115-119](conftest.py#L115-L119)), and so does `CustomLogger.__init__`. The debug artifact becomes interleaved and partially erased. |
+| L6 | **[Improvement]** | Per-request overhead: every request re-reads `protected_keys.txt` ([utils.py:391](Utils/utils.py#L391)), opens log files without closing them (`open(log_file_path, 'w')`, [utils.py:322](Utils/utils.py#L322)), and builds and sanitizes the curl string twice. There is also dead code (`if 1 == 0:` at [utils.py:290](Utils/utils.py#L290)), and `__main__` calls a non-existent `log_header` ([logger.py:235](app/logger.py#L235)). |
+| L7 | **[Improvement]** | Logging bypasses the standard pytest logging integration: there is no file handler, the logger propagates to root (duplicates under `caplog`/`--log-cli`), and a `HEADER`-level message temporarily swaps handlers, which is not thread-safe. 182 `print()` calls coexist with the logger. |
+| L8 | **[Risk]** | **Two incompatible JSON report formats.** The root conftest configures `pytest-json-report` options (`config.option.json_report*`, [conftest.py:97-100](conftest.py#L97-L100)) and reads a top-level `"summary"`. `run_tests.py` invokes `--json=` from `pytest-json`, which is what `requirements.txt` lists, and reads `["report"]["summary"]`. Only one of these can be correct for a given install. |
+
+**Secret handling (positive, with caveats).** Sanitization is layered: a key-based scrub, then a final pass that replaces any `protected_keys.txt` env-var value found in the message and refuses to push to RP if one remains ([utils.py:389-417](Utils/utils.py#L389-L417)). That is good practice. Caveats:
+- `sanitize_log()` can be turned off locally with `SANITIZE_LOG=false`, and then raw curl commands with passwords and tokens are written to `curl.txt` on disk.
+- `UserAPI.provide()` and `get_locations()` put `access_token` in query strings ([api_new.py:149](app/api_new.py#L149), [173](app/api_new.py#L173)), so the masking depends on `sanitize_url_params`.
+
+---
+
+## 4. Configuration, `conftest.py`, and fixtures
+
+### 4.1 Parameter flow
+
+```
+options.json ──► pytest_addoption (--environment, --project, --ci, --live_logging, --2fa, ...)
+.env.local.json ──► os.environ  (at conftest import, unless CI=true)        ┐
+GitHub/env vars  ──► os.environ  (INPUT_ENV, *_PASS, RP_UUID, JIRA_TOKEN...) ├─► pytest_configure → config.env / config.*
+run_tests.py ──► builds CLI string from env vars + options.json keys        ┘
+config.env ──► base_url fixture ──► client fixtures
+os.environ['INPUT_ENV'] ──► testData passwords        ◄── a second, independent source of the environment
+os.environ['VPN_USER_AUTH_TYPE'] ──► get_auth_methods ──► parametrization (option exists in options.json but is unused)
+```
+
+Configuration comes from four sources (CLI, `options.json`, `.env.local.json`, process env), and their precedence is undocumented and in places contradictory.
+
+### 4.2 Findings
+
+| # | Sev. | Type | Finding |
+|---|---|---|---|
+| C1 | **Critical** | **[Defect]** | **`--environment` is silently overridden.** `config.env` is validated against `Dev/Stage/Prod` and then replaced by `INPUT_ENV` with no validation ([conftest.py:75-83](conftest.py#L75-L83)). Locally, `.env.local.json` (which contains `INPUT_ENV`) is loaded into `os.environ` at import ([conftest.py:27-32](conftest.py#L27-L32)), so the README's `pytest --environment Dev` can hit Stage. `testData` also builds secret names from `os.environ['INPUT_ENV']` rather than `config.env` ([conftest.py:230-237](conftest.py#L230-L237)). This is a real risk of running destructive tests against the wrong environment. |
+| C2 | High | **[Defect]** | **`--ci true` crashes the session.** `pytest_sessionstart` uses `config.webhook_url` ([conftest.py:123](conftest.py#L123)), which is never assigned anywhere, so the result is `AttributeError` outside any `try`. In `sessionfinish` the same error is swallowed by `except Exception`. In practice the in-pytest Slack path is dead, and `run_tests.py` does its own Slack posting. |
+| C3 | High | **[Defect]** | **Scope mismatches when `-m smoke_prod` is used.** `determine_scope` returns `"session"` for `smoke_prod` ([conftest.py:214-220](conftest.py#L214-L220)), but some dynamic-scope fixtures depend on function-scoped ones. `totalsecurity_user_authenticated` depends on `func_user_params` and `func_totalsecurity_info` ([Tests/conftest.py:676-677](Tests/conftest.py#L676-L677)). `pango_user_2fa_authenticated` depends on `objects_api_authenticated` (function), `auth_authenticated` (module), and `func_user_params` ([Tests/conftest.py:467-468](Tests/conftest.py#L467-L468)). pytest raises `ScopeMismatch` when these are requested in session scope. Also, `determine_scope` matches only the exact string `-m smoke_prod`, so `-m "smoke_prod and not x"` silently changes behavior. |
+| C4 | High | **[Defect]** | **Copy-paste fixture bugs.** `func_objects_api_authenticated` takes the session-scoped `objects_api` instead of `func_objects_api` ([Tests/conftest.py:175](Tests/conftest.py#L175)). `func_auth_authenticated` takes the module-scoped `auth` instead of `func_auth` ([Tests/conftest.py:445](Tests/conftest.py#L445)). The "function-scoped" variants therefore mutate shared instances, and `func_objects_api` and `func_auth` are effectively unused. |
+| C5 | High | **[Risk]** | **Shared partner instance across six login fixtures.** All `partner_authenticated*` fixtures re-authenticate the same `partner` fixture object with different credentials ([Tests/conftest.py:76-122](Tests/conftest.py#L76-L122)). A test or fixture chain that requests two of them ends up with one object holding the last login, and the first teardown logs out both. |
+| C6 | Medium | **[Defect]** | **In-place mutation of shared parameter dicts.** `fsec_user_authenticated` and `pango_user_authenticated` write `access_token`/`auth_method` into `user_params` ([Tests/conftest.py:199-200](Tests/conftest.py#L199-L200), [310-311](Tests/conftest.py#L310-L311)). Several `func_*` fixtures do the same to `func_user_params`, with the protective `.copy()` commented out ([Tests/conftest.py:294](Tests/conftest.py#L294), [744](Tests/conftest.py#L744), [806](Tests/conftest.py#L806)). Any other fixture or test in the same scope then sees a modified `auth_method`. |
+| C7 | Medium | **[Defect]** | `testData` returns the imported Python module and mutates `module.data` in place ([conftest.py:223-242](conftest.py#L223-L242)). The data is global, process-wide, and leaks between sessions in the same interpreter. |
+| C8 | Medium | **[Risk]** | Hard requirements are evaluated even when unused. `pytest_configure` needs `RP_UUID` and `JIRA_TOKEN` ([conftest.py:91](conftest.py#L91), [105-111](conftest.py#L105-L111)). `testData` needs `grpc_pass`, `PSK_PASSWORD`, and five `*_PASS_AFT_*` keys. A missing `.env.local.json` crashes import with `FileNotFoundError` when `CI` is not `"true"`. All of these raise bare `KeyError`s with no guidance. |
+| C9 | Medium | **[Defect]** | `ENCRYPT_ON = os.environ.get('ENCRYPT_ON', False)` treats any non-empty string, including `"false"`, as enabled ([conftest.py:21](conftest.py#L21), [http_wrapper.py:287](app/http_wrapper.py#L287), [utils.py:26](Utils/utils.py#L26), [utils.py:41](Utils/utils.py#L41), `run_tests.py:560`). |
+| C10 | Medium | **[Defect]** | Teardown asserts. The fsec and totalsecurity fixtures `assert False` / `assert status == 200` after `yield` ([conftest.py:397](conftest.py#L397), [526](conftest.py#L526)). A mock-service hiccup on deactivate turns a passed test into an `ERROR`. `func_fsec_info` and `func_totalsecurity_info` also omit `verify=isCertVerifyEnabled()` and headers that their twins send. |
+| C11 | Medium | **[Risk]** | Resource leaks in 2FA fixtures. Templates are created *before* the `try` ([Tests/conftest.py:474-486](Tests/conftest.py#L474-L486)), so a failure on the second create leaks the first. The created Pango user is never deleted, and `vpn_user.logout()` is never called. |
+| C12 | Low | **[Improvement]** | `vpn_user_authenticated` and `func_vpn_user_authenticated` are long `if/elif` chains that equal `request.getfixturevalue(request.param)` with an allow-list ([Tests/conftest.py:334-352](Tests/conftest.py#L334-L352)). Elite fixtures catch every exception and replace it with `pytest.fail("Elite authentication failed")`, which discards the root cause ([Tests/conftest.py:710-715](Tests/conftest.py#L710-L715)). |
+| C13 | Low | **[Improvement]** | Dead or odd hooks. `pytest_runtest_protocol` maintains an unexplained `_retry_var` (+600 per call) ([conftest.py:292-300](conftest.py#L292-L300)). The `get_run_details` fixture returns `None` ([conftest.py:210-211](conftest.py#L210-L211)). `pytest_addini` registers RP keys as `pathlist`, which are then overwritten through the private `config._inicache` ([conftest.py:91-95](conftest.py#L91-L95)). The `VPN_USER_AUTH_TYPE` CLI option is defined but only the env var is read. |
+
+---
+
+## 5. OOP and coding practices
+
+| # | Sev. | Type | Finding |
+|---|---|---|---|
+| O1 | High | **[Defect]** | **Shared header mutation in `make_request`.** When `headers` is `None`, the method uses `self.headers` *by reference* and then mutates it: `update_headers` and `X-GeoIP-Secret` ([http_wrapper.py:299-306](app/http_wrapper.py#L299-L306)). Per-call header overrides persist on the client for all later requests. Caller-supplied header dicts are also mutated. Domain methods like `PartnerAPI.set_limit` permanently switch the client's `Content-Type` ([api_new.py:222-233](app/api_new.py#L222-L233)). Copy headers per request (`headers = {**(headers or self.headers), **(update_headers or {})}`). |
+| O2 | High | **[Defect]** | **Form-encoded + encryption path raises.** `__data = urlencode(body)` produces a `str`, and the next line does `__data['password'] = ...`, which raises `TypeError` ([http_wrapper.py:318-321](app/http_wrapper.py#L318-L321)). The same bug is duplicated in `_execute_comparison_request` ([http_wrapper.py:473-476](app/http_wrapper.py#L473-L476)). It surfaces whenever `ENCRYPT_ON` is set (see C9), and also raises `KeyError` when the body has no password. |
+| O3 | High | **[Risk]** | **Schema-validation exceptions likely not caught as intended.** The code catches `jsonschema.ValidationError` and reads `ve.validator`, `ve.schema`, and `ve.path` ([http_wrapper.py:9](app/http_wrapper.py#L9), [233](app/http_wrapper.py#L233), [390](app/http_wrapper.py#L390), [509-517](app/http_wrapper.py#L509-L517)). `openapi_core` 0.19's `validate_request`/`validate_response` raise `openapi_core` `OpenAPIError` subclasses (the legacy `app/api.py:23` imports exactly that). If so, validation failures fall through to `except Exception` and are re-raised as a generic `Exception('Unexpected error: ...')`, which loses the formatted diagnostics. Response validation also runs *before* the 502/503 retry checks ([http_wrapper.py:386-415](app/http_wrapper.py#L386-L415)), so a transient gateway error may surface as a validation failure instead of being retried. *Verify with a deliberately invalid response.* |
+| O4 | Medium | **[Defect]** | `@abstractmethod` on `BaseAPI.authenticate`/`logout` has no effect because `BaseAPI` doesn't use `ABCMeta` ([base_api.py:56-62](app/base_api.py#L56-L62)). `ObjectsAPI` and `Auth` don't implement `logout`, so `objects_api.logout()` resolves to the empty abstract stub, and the `objects_api_authenticated` teardown is a silent no-op ([Tests/conftest.py:166](Tests/conftest.py#L166)). |
+| O5 | Medium | **[Risk]** | **Network I/O in constructors.** Every `BaseAPI` instance calls `HostDetails()`, which makes an un-timed `requests.get('https://geoip.northghost.com')` and asserts on failure ([base_api.py:9-27](app/base_api.py#L9-L27), [49](app/base_api.py#L49)). Function-scoped clients repeat this per test. A hung geo-IP service hangs the suite because there is no timeout. |
+| O6 | Medium | **[Improvement]** | **Five-way multiple inheritance.** `Auth(PangoUser, PangoSession, PangoPublic, PangoGrant, PangoGateway)` ([api_new.py:431](app/api_new.py#L431)) merges unrelated services into one god object with shared mutable `headers`, `access_token`, and `backup_headers`. Composition (`auth.users`, `auth.sessions`, `auth.grants`, ...) over one transport would be clearer. |
+| O7 | Medium | **[Improvement]** | **"Flag-argument" APIs.** `make_request` has 18 parameters, and `UserAPI.authenticate` has 15 boolean switches that embed *test assertions* inside the client (`check_service_unavailable`, `auth_user_disabled`, `oauth_failed`, `psk_failed_login_test`, ...) ([api_new.py:23-92](app/api_new.py#L23-L92)). Clients should return responses, and tests should assert. |
+| O8 | Medium | **[Improvement]** | **Duplication.** The root conftest has `fsec_info`/`func_fsec_info` and `totalsecurity_info`/`func_totalsecurity_info` (about 340 near-identical lines). `Tests/conftest.py` has eight `func_*` twins and six partner-login clones. URL normalization is duplicated across `_validate_request`, `_validate_response`, and `_execute_comparison_request`. `remove_authorization`/`restore_authorization` is implemented three times. `get_project_root()` is defined in at least six modules. A fixture factory parametrized by scope removes most of this. |
+| O9 | Low | **[Defect]** | Mutable default arguments `body={}` and `params={}` ([api_new.py:23](app/api_new.py#L23), [253](app/api_new.py#L253), [441](app/api_new.py#L441)). `UserAPI.authenticate` stores `body` as `self.__params`, and `get_params()` later pops from it ([api_new.py:114-116](app/api_new.py#L114-L116)), which mutates the caller's dict or the shared default. |
+| O10 | Low | **[Defect]** | `get_fsecure_uid` posts `{"authentication_token": {token}}`, a Python `set`, which is not JSON-serializable ([utils.py:54-57](Utils/utils.py#L54-L57)). It's currently unused, so it should be fixed or deleted. |
+| O11 | Low | **[Improvement]** | Name-mangled attributes (`self.__login_response`, `self.__access_token`) are set in both `BaseAPI` and subclasses, which creates separate `_BaseAPI__*` and `_PartnerAPI__*` copies. `UserAPI.get_response` reaches in with `hasattr(self, '_UserAPI__login_response')`. Use single-underscore attributes. |
+| O12 | Low | **[Improvement]** | Typing and naming: only about 40 annotated functions across `app/` and `Utils/`. Mixed naming styles (`Slack_Info`, `setExec_Scope`, `isCertVerifyEnabled`, `Waive_Validations`/`Wave_Validations`). Hardcoded identities and passwords in code (`api_auth.py:17-18`, `conftest.py:105-109`, `TestData/StageTestData.py:61`). `@cache` on an instance method keeps every client alive ([http_wrapper.py:175](app/http_wrapper.py#L175)). |
+| O13 | Low | **[Improvement]** | `PartnerAPI.logout` logs "already logged out" when logout actually *failed* with non-200 ([api_new.py:208-216](app/api_new.py#L208-L216)). `UserAPI.logout` uses `del self.headers['Authorization']` and raises `KeyError` if it's already removed ([api_new.py:181](app/api_new.py#L181)). |
+
+---
+
+## 6. Test reliability and hardware automation
+
+### 6.1 Test execution and reliability
+
+| # | Sev. | Type | Finding |
+|---|---|---|---|
+| R1 | High | **[Defect]** | **The "run after" DelayTests step uses a wrong path, and those tests run twice.** `after_all_list = ['Tests/User/Login/DelayTests']` is joined onto `base_dir`, which already ends in `Tests`, so the command targets `…/Tests/Tests/User/Login/DelayTests` (`run_tests.py:38`, `153`, `349-351`). The report path `reports/report_tests/user/login/delaytests.json` sits in a directory that was never created. The parallel-phase exclusion compares an absolute path with a relative prefix (`run_tests.py:312`), so it never matches, and DelayTests run inside the parallel `User` folder anyway, concurrently with the other User tests. That is the opposite of the intent. |
+| R2 | High | **[Risk]** | **Failures can be reported as success.** `run_tests.py` ignores each subprocess `exit_code`. If a folder crashes before producing a report (collection error, `ScopeMismatch`, missing env var), `merge_reports` logs and skips it (`run_tests.py:237-266`), and the final status is computed only from the merged summary. The process exits 0 on failures unless `--fail-on-test-failure` is passed (`run_tests.py:693-699`). `process.communicate()` has no timeout (`run_tests.py:200`). |
+| R3 | High | **[Risk]** | **Retry loop masks real defects and inflates runtime.** `make_request` retries up to 25 times or 300 s with adaptive delay up to 10 s ([http_wrapper.py:288-291](app/http_wrapper.py#L288-L291)) on 502, 503, CloudFront 403, `REQUEST_LIMIT_EXCEED`, and **any `OAUTH_ERROR`** by default (`enable_retry=True`, [http_wrapper.py:424](app/http_wrapper.py#L424), [556-559](app/http_wrapper.py#L556-L559)). A negative test expecting `OAUTH_ERROR` waits minutes unless it remembers `skip_retry_for`, and an intermittently failing backend is reported green. Delay state is process-global and stored in `os.environ` ([http_wrapper.py:71-74](app/http_wrapper.py#L71-L74)), so one slow test slows the following ones. |
+| R4 | Medium | **[Risk]** | **Hard sleeps.** There are 101 `time.sleep` calls, including `sleep(905)` ×4 and `sleep(605)` ×2 for 2FA expiry (for example [Tests/Pango_Auth/2FA/test_channel_add.py:352](Tests/Pango_Auth/2FA/test_channel_add.py#L352)), staggered delays in fixtures, and a 2 s sleep after every comparison request. Prefer polling with a deadline, or configurable short TTLs in test namespaces. |
+| R5 | Medium | **[Risk]** | **IMAP polling.** `get_verification_code` opens a new SSL connection and logs in to Gmail every iteration with a 0.1 s pause for up to 110 s ([Utils/email_utils.py:108-170](Utils/email_utils.py#L108-L170)), which invites provider throttling. It also catches all exceptions silently. |
+| R6 | Medium | **[Risk]** | **Isolation.** Tests that call `remove_authorization()` don't restore it in `finally` (for example [Tests/User/test_locations.py:26-31](Tests/User/test_locations.py#L26-L31)). Under `smoke_prod` session scope, one failure leaves the shared client unauthenticated. Many create-type tests (subscribers, licenses) have no cleanup and rely on the license sweep in `clear_license_key_list`, whose messages also refer to the wrong project name (`par_autotest`, [conftest.py:589-619](conftest.py#L589-L619)). |
+| R7 | Medium | **[Improvement]** | **Test hygiene.** 160 `skip` marks (27 "Skipped till further investigation" and 21 "TBD"), 28 `xfail`, and 14 `flaky(reruns=…)`. 22 marker names are used but not registered (`negative`, `limits`, `g1`, `s0`, `ppp`, `smoke_prod1`, ...), `--strict-markers` is not enabled, and `locations` is registered twice in [pytest.ini](pytest.ini). About 2,880 of 3,620 asserts have no message. `Tests/Partner/test_dumy.py` exists. |
+| R8 | Low | **[Improvement]** | Timeouts are inconsistent. `make_request` uses a fixed `timeout=20`, but `HostDetails`, the fsec/totalsecurity mocks, `EliteAuth` (5 calls), Slack, and RP calls in `run_tests.py` have **no timeout** at all. |
+
+**Positives:** heavy use of `@pytest.mark.parametrize` (174 uses), the auth-method matrix, environment-aware skip markers (`skip_prod_env`, ...), OpenAPI contract validation on most calls, and unique per-test identifiers (UUID, random device IDs) that reduce collisions.
+
+### 6.2 Hardware and instrument automation
+
+**Not applicable.** The codebase has no PyVISA, SCPI, or instrument code (a search for `pyvisa`, `scpi`, and `visa.` returned no matches). The closest analogue is external-service connection handling (HTTP, IMAP), covered in R3, R5, R8, and O5.
+
+---
+
+## 7. Identified issues and improvements (consolidated)
+
+| ID | Severity | Category | Location | Type |
+|---|---|---|---|---|
+| C1 | **Critical** | Config | `conftest.py:75-83, 230` (`pytest_configure`, `testData`) | Defect: CLI env overridden, risk of wrong target environment |
+| R1 | High | Execution | `run_tests.py:38, 153, 312, 349` (`TestExecutor`) | Defect |
+| R2 | High | Reporting | `run_tests.py:200, 237-266, 693` | Risk: false green |
+| R3 | High | Reliability | `app/http_wrapper.py:288-431, 519-564` (`make_request`, `__should_retry`) | Risk |
+| O1 | High | OOP/state | `app/http_wrapper.py:299-306`; `app/api_new.py:222-233` | Defect |
+| O2 | High | Correctness | `app/http_wrapper.py:318-321, 473-476` | Defect |
+| O3 | High | Validation | `app/http_wrapper.py:9, 233, 269, 390, 509` | Risk (verify) |
+| C2 | High | Config | `conftest.py:123, 137` (`pytest_sessionstart/finish`) | Defect |
+| C3 | High | Fixtures | `Tests/conftest.py:467, 676`; `conftest.py:214` | Defect (smoke_prod) |
+| C4 | High | Fixtures | `Tests/conftest.py:175, 445` | Defect |
+| C5 | High | Fixtures | `Tests/conftest.py:76-122` | Risk |
+| L1 | High | Logging | `app/logger.py:87-124, 209` | Defect |
+| L2 | Medium | Reporting | `conftest.py:198-206, 268` | Defect |
+| L8 | Medium | Reporting | `conftest.py:97-100, 254`; `run_tests.py:153, 466` | Risk |
+| C6/C7 | Medium | Isolation | `Tests/conftest.py:199, 294, 310, 744, 806`; `conftest.py:223-242` | Defect |
+| C9 | Medium | Config | `ENCRYPT_ON` (5 sites) | Defect |
+| C10/C11 | Medium | Cleanup | `conftest.py:372-406, 517-530`; `Tests/conftest.py:474-558` | Defect / Risk |
+| O4/O5 | Medium | OOP | `app/base_api.py:9-62` | Defect / Risk |
+| R4/R5/R6 | Medium | Reliability | 2FA tests, `Utils/email_utils.py`, `Tests/User/test_locations.py` | Risk |
+| O6-O8 | Medium | Design | `app/api_new.py`, `app/api_auth.py`, conftests | Improvement |
+| Arch | Medium | Architecture | `app/api.py` (legacy) + `app/api_new.py`; `app` → `Tests` import | Improvement |
+| L3-L7, O9-O13, R7-R8, C8, C12-C13 | Low | Various | see sections above | Defect / Improvement |
+
+---
+
+## 8. Framework maturity assessment
+
+**Assigned level: 2 (Basic), with some Level 3 elements.**
+
+| Dimension | Evidence | Level |
+|---|---|---|
+| Architecture/layering | `BaseAPI → HttpRequests` client layer and per-service clients, but two coexisting API layers, `app` importing from `Tests`, a 5-way MI god object | 2–3 |
+| Config management | Multi-env support exists, but four overlapping sources, CLI silently overridden (C1), string-truthiness bugs (C9), crash on missing optional secrets (C8) | 2 |
+| Fixtures/isolation | Rich fixture set and dynamic scope, but wrong-dependency bugs (C4), scope mismatches (C3), shared mutable state (C5-C7, O1) | 2 |
+| Reliability | Adaptive back-off and contract validation, but blanket retries that mask defects (R3), 101 sleeps, 160 skips, flaky reruns | 2 |
+| Reporting/observability | RP integration, layered secret sanitization, Slack summaries, parallel merge, but broken log replay (L1), nodeid overwrite (L2), dual JSON formats (L8), false-green risk (R2) | 2–3 |
+| Engineering hygiene | No unit tests for the framework, no lint, type, or CI config in the repo, sparse type hints, duplicated and unpinned requirements, dead code | 1–2 |
+
+**Why not Level 3:** Level 3 means the core infrastructure is dependable and conventions are enforced. Here several framework-level paths are demonstrably broken (L1, R1, C2, C4, O2) without anyone noticing. That points to missing self-tests and static checks, and to configuration and isolation behavior that depends on undocumented precedence.
+
+**Main limiting factors:**
+1. Shared mutable state at every layer (headers, test data, session clients, the global delay manager).
+2. Duplication instead of abstraction (fixture twins, two API layers).
+3. Reliability handled by retries and sleeps rather than deterministic synchronization.
+4. No quality gates on the framework code itself.
+
+---
+
+## 9. Prioritized recommendations
+
+**P0: correctness and safety (do first)**
+1. **Single source of truth for the environment.** Resolve the environment once in `pytest_configure` with explicit precedence (CLI over env var over default), validate *after* the override, and derive all secret names from `config.env`. Fail loudly if `INPUT_ENV` disagrees with `--environment`. (C1)
+2. **Fix the runner.**
+   - Make `after_all_list` relative to `base_dir` (`'User/Login/DelayTests'`), use `--ignore` for it in the parallel phase, and create report sub-directories.
+   - Treat a non-zero exit code or a missing report as a failure.
+   - Add a `communicate(timeout=...)`.
+   - Make `--fail-on-test-failure` the default in CI. (R1, R2)
+3. **Stop mutating shared headers.** Build a fresh header dict per request, and stop domain methods from changing `self.headers['Content-Type']`. (O1)
+4. **Fix the confirmed one-line defects:**
+   - Form-data encryption ordering (O2).
+   - `func_objects_api_authenticated` → `func_objects_api`, and `func_auth_authenticated` → `func_auth` (C4).
+   - Set or remove `config.webhook_url` (C2).
+   - Boolean parsing helper for `ENCRYPT_ON` and similar flags (C9).
+   - Missing `f` prefix (L3).
+   - `get_fsecure_uid` set literal (O10).
+
+**P1: reliability and diagnosability**
+5. **Narrow retries.** Retry only on transport errors and 502/503/429 (or CloudFront 403), with a small cap (for example 3–5 attempts or 60 s). Make `OAUTH_ERROR` and `REQUEST_LIMIT_EXCEED` retries opt-in per call. Log every retry at WARNING so masked instability shows up in reports. (R3)
+6. **Catch the right validation exceptions** (`openapi_core` `OpenAPIError` subclasses), and run response validation only after retry classification. Add one framework test that feeds a known-bad response. (O3)
+7. **Fix the logging pipeline.** Either remove the buffered mode, or replay buffered logs on failure in `pytest_runtest_makereport` and clear the buffer per test. Stop overwriting `report.nodeid`. Write a per-worker `curl_<worker>.txt` with `pathlib`. Standardize on one JSON report plugin. (L1, L2, L4, L5, L8)
+8. **Fixture scoping.** Ensure every `determine_scope` fixture depends only on fixtures of equal or broader scope, and derive the scope from `config.option.markexpr` robustly. Always `.copy()` parameter dicts before modifying them. Give each `partner_authenticated_*` its own `PartnerAPI` instance. (C3, C5, C6)
+9. **Teardown hygiene.** Wrap the full setup in `try/finally`, delete created users and templates, replace teardown `assert` with logged warnings, and use `try/finally` around `remove_authorization`/`restore_authorization` (or a context manager). (C10, C11, R6)
+10. **Timeouts everywhere**, including `HostDetails`, mocks, Elite, Slack, and RP. Fetch geo-IP info once per session rather than per client. (O5, R8)
+
+**P2: maintainability**
+11. **Retire `app/api.py`.** Move `ExceptionCollector` to `Utils`, migrate the three remaining importers, and remove the `app → Tests` import. (Architecture)
+12. **Collapse duplication.** Use one fixture factory for fsec/totalsecurity activation, one parametrized partner-login fixture, and `func_*` variants generated from a single implementation. Replace `if/elif` dispatchers with `getfixturevalue` plus an allow-list. (O8, C12)
+13. **Separate clients from assertions.** Remove the test-outcome flags from `UserAPI.authenticate`, and replace the five-way `Auth` inheritance with composition. Make `BaseAPI` a real ABC. (O4, O6, O7)
+14. **Replace hard sleeps with deadline polling.** Run long 2FA-expiry tests in a dedicated, opt-in marker group. Use IMAP with a single connection and a back-off schedule. (R4, R5)
+15. **Quality gates.**
+    - Enable `--strict-markers` and register or remove the 22 unknown markers.
+    - Triage the 48 "TBD"/"investigation" skips into tickets.
+    - Add `ruff` and `mypy` (start with `app/` and `Utils/`).
+    - Pin all dependencies, add `jsonschema`, and drop Selenium from the runtime requirements.
+    - Add a small `tests_framework/` suite for `HttpRequests`, sanitization, and the runner. (R7, O12)
+
+---
+
+## 10. Conclusion
+
+The framework has a workable core: a central HTTP client with contract validation, layered secret scrubbing, environment-aware markers, an auth-method matrix, and ReportPortal/Slack integration. It already supports a large API regression suite. Its weak point is the plumbing around that core. Configuration precedence, fixture scoping, shared mutable state, the parallel runner, and the logging pipeline all contain confirmed defects that can produce false greens, wrong-environment runs, or cross-test interference, and broad retries and sleeps hide the resulting instability.
+
+Fixing the P0 items is mostly local, low-risk changes, and it would remove the most dangerous failure modes. The P1 items would make results trustworthy and failures diagnosable. With the P2 consolidation and basic quality gates in place, the framework could realistically reach **Level 3 (Established)**.
