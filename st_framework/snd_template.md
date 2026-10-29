@@ -6,11 +6,11 @@
 
 ## How to read this document
 
-| Keyword | Meaning |
-|---|---|
-| **MUST** / **MUST NOT** | Mandatory standard. A project that deviates needs a written, reviewed justification in its README. |
-| **SHOULD** / **SHOULD NOT** | Strong recommendation. Deviate only for a concrete reason. |
-| **MAY** | Optional. Adopt when the project's size or needs justify it. |
+| Keyword                     | Meaning                                                                                            |
+|:----------------------------|:---------------------------------------------------------------------------------------------------|
+| **MUST** / **MUST NOT**     | Mandatory standard. A project that deviates needs a written, reviewed justification in its README. |
+| **SHOULD** / **SHOULD NOT** | Strong recommendation. Deviate only for a concrete reason.                                         |
+| **MAY**                     | Optional. Adopt when the project's size or needs justify it.                                       |
 
 Mandatory items are also collected in the [compliance checklist](#13-compliance-checklist).
 
@@ -71,13 +71,13 @@ Mandatory items are also collected in the [compliance checklist](#13-compliance-
 
 ### 2.2 Module responsibilities and dependency rules
 
-| Layer | Responsibility | May import | MUST NOT |
-|---|---|---|---|
-| `tests/` | Express test intent, parameters and assertions | everything below | contain protocol strings, raw I/O, sleeps, or cleanup outside fixtures |
-| `tests/conftest.py`, `tests/plugins/` | Wire configuration to objects; own lifecycles | framework package | contain business logic or measurement logic |
-| `flows/` | Reusable multi-step operations (e.g. "power-cycle DUT and wait for boot") | drivers, clients, waits | assert test outcomes; import `pytest` |
-| `instruments/`, `clients/` | One class per device or service; encapsulate protocol details | config types, errors, waits | import `pytest`, test modules or `conftest`; read CLI options; open resources at import |
-| `config.py`, `paths.py`, `errors.py`, `waits.py` | Foundations | stdlib, small third-party libraries | import anything above them |
+| Layer                                            | Responsibility                                                            | May import                          | MUST NOT                                                                                |
+|:-------------------------------------------------|:--------------------------------------------------------------------------|:------------------------------------|:----------------------------------------------------------------------------------------|
+| `tests/`                                         | Express test intent, parameters and assertions                            | everything below                    | contain protocol strings, raw I/O, sleeps, or cleanup outside fixtures                  |
+| `tests/conftest.py`, `tests/plugins/`            | Wire configuration to objects; own lifecycles                             | framework package                   | contain business logic or measurement logic                                             |
+| `flows/`                                         | Reusable multi-step operations (e.g. "power-cycle DUT and wait for boot") | drivers, clients, waits             | assert test outcomes; import `pytest`                                                   |
+| `instruments/`, `clients/`                       | One class per device or service; encapsulate protocol details             | config types, errors, waits         | import `pytest`, test modules or `conftest`; read CLI options; open resources at import |
+| `config.py`, `paths.py`, `errors.py`, `waits.py` | Foundations                                                               | stdlib, small third-party libraries | import anything above them                                                              |
 
 **MUST**
 - Dependencies flow downward only. A driver never inherits from or imports a test base class, fixture or `conftest`.
@@ -291,11 +291,11 @@ def settings(pytestconfig: pytest.Config) -> Settings:
 - Acquire and release a resource in the **same** fixture. Do not open in one fixture and close in another.
 - Choose scope deliberately:
 
-  | Scope | Use for |
-  |---|---|
-  | `session` | settings, VISA `ResourceManager`, instrument connections, authenticated API sessions |
-  | `module` / `class` | expensive shared state that tests in that file treat as read-only |
-  | `function` (default) | anything a test mutates: instrument state, created entities, temp dirs |
+| Scope                | Use for                                                                              |
+|:---------------------|:-------------------------------------------------------------------------------------|
+| `session`            | settings, VISA `ResourceManager`, instrument connections, authenticated API sessions |
+| `module` / `class`   | expensive shared state that tests in that file treat as read-only                    |
+| `function` (default) | anything a test mutates: instrument state, created entities, temp dirs               |
 
 - When a long-lived connection is shared, a **function-scoped** fixture restores a known state before each test (reset and configure) and makes the device safe after it.
 - Register cleanup of entities a test creates (users, files, DUT configuration) **at creation time** through a fixture. Never write cleanup as the last statements of a test body.
@@ -537,12 +537,12 @@ def psu(_psu_session: ScpiPowerSupply) -> Iterator[ScpiPowerSupply]:
 - Use `print()` only in `tools/` scripts. Framework and test code logs.
 - Use log levels consistently:
 
-  | Level | Content |
-  |---|---|
-  | `DEBUG` | Raw I/O (SCPI traffic, HTTP request and response summaries), polling iterations |
-  | `INFO` | Test-relevant actions and results: connections, configuration applied, measurements with units |
-  | `WARNING` | Recoverable anomalies: retries, unexpected-but-tolerated responses |
-  | `ERROR` | Failures the framework is about to raise, with context |
+| Level     | Content                                                                                        |
+|:----------|:-----------------------------------------------------------------------------------------------|
+| `DEBUG`   | Raw I/O (SCPI traffic, HTTP request and response summaries), polling iterations                |
+| `INFO`    | Test-relevant actions and results: connections, configuration applied, measurements with units |
+| `WARNING` | Recoverable anomalies: retries, unexpected-but-tolerated responses                             |
+| `ERROR`   | Failures the framework is about to raise, with context                                         |
 
 - Write a full `DEBUG` log file per run into the run's artifact directory. Console output stays at `INFO` or above.
 - Never log secrets. Redact tokens and passwords in client request logging.
@@ -848,27 +848,27 @@ Use this when reviewing a new framework or a pull request that changes framework
 
 Each problem observed in `snd_report.md` maps to the standard that prevents it.
 
-| Observed problem (report ref.) | Preventing standard |
-|---|---|
-| Credentials, tokens and a client secret committed (F-01) | §4.1 no secrets; §3 secret scanner; §11 CI secret store |
-| Hardcoded absolute project roots and report paths (F-02) | §1.1, §4.1 root-relative paths; §8.1 paths from CLI |
-| Reporting hook crashes on tests without the expected fixture (F-03) | §8.1 hooks never raise; `funcargs.get`; §8.2 registered diagnostics |
-| Cleanup as the last test statements; skipped on failure (F-04) | §5.1 cleanup at creation time; §5.2 `ExitStack` registry |
-| Resource opened in one fixture and closed in another; leaks on setup failure (F-05) | §5.1 same-fixture acquire and release, `yield` plus `finally` |
+| Observed problem (report ref.)                                                                                 | Preventing standard                                                                             |
+|:---------------------------------------------------------------------------------------------------------------|:------------------------------------------------------------------------------------------------|
+| Credentials, tokens and a client secret committed (F-01)                                                       | §4.1 no secrets; §3 secret scanner; §11 CI secret store                                         |
+| Hardcoded absolute project roots and report paths (F-02)                                                       | §1.1, §4.1 root-relative paths; §8.1 paths from CLI                                             |
+| Reporting hook crashes on tests without the expected fixture (F-03)                                            | §8.1 hooks never raise; `funcargs.get`; §8.2 registered diagnostics                             |
+| Cleanup as the last test statements; skipped on failure (F-04)                                                 | §5.1 cleanup at creation time; §5.2 `ExitStack` registry                                        |
+| Resource opened in one fixture and closed in another; leaks on setup failure (F-05)                            | §5.1 same-fixture acquire and release, `yield` plus `finally`                                   |
 | Serial ports opened and infinite loop started at import; escaped `"\\r\\n"` terminator; sleep-then-read (F-06) | §6.1 explicit terminations, bounded I/O, self-test of bytes written; §10 no import side effects |
-| Context manager `__exit__` returning `True` (F-06) | §6.1 never suppress exceptions |
-| Test class silently not collected (F-07) | §9.4 collected-count check; §3 `--strict-markers`/`--strict-config` |
-| CI wrapper always exits 0; global reruns hide flakiness (F-08) | §11 exit-code propagation; §9.4 flakiness policy |
-| Loggers created per object and never used; duplicate handlers; `print` (F-09) | §7 single configuration, module loggers, per-run log file |
-| CLI options ignored by some modules; config sections unused; hardcoded endpoints (F-10, F-11) | §4.1 single `Settings` object, no dead config |
-| Errors swallowed and `None` returned; unbounded waits (F-12) | §9.1 raise, never return `None`; §9.2 deadlines |
-| Fixture crashing when an optional option is absent (F-13) | §4.1 validated settings with effective defaults |
-| Shared files and folders between tests (F-14) | §5.1 `tmp_path`; §9.3 no shared mutable files |
-| Collision-prone random data (F-15) | §9.3 UUID-based, run-tagged identifiers |
-| Fixed sleeps throughout (F-16) | §6.4, §9.2 condition-based waiting |
-| 300+ generic `raise Exception(...)` wrappers (F-17) | §9.1 typed hierarchy, `from exc`, no vague re-wrapping |
-| Components instantiating peers; hidden workflows (F-18) | §2.2 `flows/` layer, downward-only dependencies |
-| Positional booleans; results via side-effect attributes (F-19) | §10 keyword-only switches, return created objects |
-| Dead code, sandbox and TODO tests collected; unused dependencies (F-20, F-21) | §2.2 `tools/` outside collection; §9.4 explicit skip/xfail; §3 dependency hygiene |
-| Missing machine-readable results (F-22) | §8.1 JUnit XML, structured measurements |
-| Copy-paste variant tests (F-23) | §9.3 parametrisation; §10 no parameter-only copies |
+| Context manager `__exit__` returning `True` (F-06)                                                             | §6.1 never suppress exceptions                                                                  |
+| Test class silently not collected (F-07)                                                                       | §9.4 collected-count check; §3 `--strict-markers`/`--strict-config`                             |
+| CI wrapper always exits 0; global reruns hide flakiness (F-08)                                                 | §11 exit-code propagation; §9.4 flakiness policy                                                |
+| Loggers created per object and never used; duplicate handlers; `print` (F-09)                                  | §7 single configuration, module loggers, per-run log file                                       |
+| CLI options ignored by some modules; config sections unused; hardcoded endpoints (F-10, F-11)                  | §4.1 single `Settings` object, no dead config                                                   |
+| Errors swallowed and `None` returned; unbounded waits (F-12)                                                   | §9.1 raise, never return `None`; §9.2 deadlines                                                 |
+| Fixture crashing when an optional option is absent (F-13)                                                      | §4.1 validated settings with effective defaults                                                 |
+| Shared files and folders between tests (F-14)                                                                  | §5.1 `tmp_path`; §9.3 no shared mutable files                                                   |
+| Collision-prone random data (F-15)                                                                             | §9.3 UUID-based, run-tagged identifiers                                                         |
+| Fixed sleeps throughout (F-16)                                                                                 | §6.4, §9.2 condition-based waiting                                                              |
+| 300+ generic `raise Exception(...)` wrappers (F-17)                                                            | §9.1 typed hierarchy, `from exc`, no vague re-wrapping                                          |
+| Components instantiating peers; hidden workflows (F-18)                                                        | §2.2 `flows/` layer, downward-only dependencies                                                 |
+| Positional booleans; results via side-effect attributes (F-19)                                                 | §10 keyword-only switches, return created objects                                               |
+| Dead code, sandbox and TODO tests collected; unused dependencies (F-20, F-21)                                  | §2.2 `tools/` outside collection; §9.4 explicit skip/xfail; §3 dependency hygiene               |
+| Missing machine-readable results (F-22)                                                                        | §8.1 JUnit XML, structured measurements                                                         |
+| Copy-paste variant tests (F-23)                                                                                | §9.3 parametrisation; §10 no parameter-only copies                                              |
