@@ -1,18 +1,24 @@
 # Test Automation Framework Template
 
-**Purpose:** An architectural and implementation baseline for new Python/pytest test automation frameworks. It covers service/API testing and laboratory instrument automation (PyVISA/SCPI).
-**Origin:** Derived from the review of an existing API test framework (`api_partner_report.md`). Each rule exists to prevent a problem that was observed in practice; Section 14 maps the rules back to those problems.
-**Out of scope:** Browser/UI automation. Selenium, WebDriver, and related tooling are deliberately excluded and must not be added to a framework built from this template.
+- **Purpose:**
+	- An architectural and implementation baseline for new Python/pytest test automation frameworks.
+	- It covers service/API testing and laboratory instrument automation (PyVISA/SCPI).
+- **Origin:**
+	- Derived from the review of an existing API test framework (`partner_report.md`).
+	- Each rule exists to prevent a problem that was observed in practice; Section 14 maps the rules back to those problems.
+- **Out of scope:**
+	- Browser/UI automation.
+	- Selenium, WebDriver, and related tooling are deliberately excluded and must not be added to a framework built from this template.
 
 ---
 
 ## 0. How to use this document
 
-| Keyword | Meaning |
-|---|---|
-| **MUST** / **MUST NOT** | Mandatory standard. Deviations need a written justification in the project README and reviewer approval. |
-| **SHOULD** / **SHOULD NOT** | Strong recommendation. Deviate only for a concrete reason. |
-| **MAY** | Optional. Adopt when it fits the project. |
+| Keyword                     | Meaning                                                                                                  |
+|:----------------------------|:---------------------------------------------------------------------------------------------------------|
+| **MUST** / **MUST NOT**     | Mandatory standard. Deviations need a written justification in the project README and reviewer approval. |
+| **SHOULD** / **SHOULD NOT** | Strong recommendation. Deviate only for a concrete reason.                                               |
+| **MAY**                     | Optional. Adopt when it fits the project.                                                                |
 
 Rules are numbered (for example `CFG-3`) so code reviews and pull requests can cite them.
 
@@ -75,16 +81,16 @@ Rules are numbered (for example `CFG-3`) so code reviews and pull requests can c
 
 ## 3. Module responsibilities `[ALL]`
 
-| Module | Owns | Must not |
-|---|---|---|
-| `config` | Loading, merging, validating, and exposing a typed, read-only `Settings` object | Read `os.environ` outside the loader, or mutate settings after startup |
-| `transport` (HTTP) | Sessions, per-request headers, timeouts, retry policy, contract validation, request/response logging | Assert test outcomes, or hold per-test state |
-| `instruments` | VISA resource-manager lifecycle, SCPI I/O, error-queue checks, locking, simulation backend | Contain test logic, or leave sessions open |
-| `clients` | Domain operations (`create_user`, `set_voltage`) composed from transport/driver objects | Contain `assert`, or carry flags like `expect_failure=True` that change behavior |
-| `data` | Immutable test-data models, builders, unique-ID generation | Be mutated by fixtures or tests |
-| `logging` | Logger setup, redaction, formatting | Implement singletons or buffer logs privately |
-| `reporting` | Attaching artifacts, publishing results to external systems | Parse reports to decide pass/fail (exit codes decide) |
-| `pytest_plugin` | CLI options, settings into `config.stash`, core fixtures, marker registration | Hold business logic |
+| Module             | Owns                                                                                                 | Must not                                                                         |
+|:-------------------|:-----------------------------------------------------------------------------------------------------|:---------------------------------------------------------------------------------|
+| `config`           | Loading, merging, validating, and exposing a typed, read-only `Settings` object                      | Read `os.environ` outside the loader, or mutate settings after startup           |
+| `transport` (HTTP) | Sessions, per-request headers, timeouts, retry policy, contract validation, request/response logging | Assert test outcomes, or hold per-test state                                     |
+| `instruments`      | VISA resource-manager lifecycle, SCPI I/O, error-queue checks, locking, simulation backend           | Contain test logic, or leave sessions open                                       |
+| `clients`          | Domain operations (`create_user`, `set_voltage`) composed from transport/driver objects              | Contain `assert`, or carry flags like `expect_failure=True` that change behavior |
+| `data`             | Immutable test-data models, builders, unique-ID generation                                           | Be mutated by fixtures or tests                                                  |
+| `logging`          | Logger setup, redaction, formatting                                                                  | Implement singletons or buffer logs privately                                    |
+| `reporting`        | Attaching artifacts, publishing results to external systems                                          | Parse reports to decide pass/fail (exit codes decide)                            |
+| `pytest_plugin`    | CLI options, settings into `config.stash`, core fixtures, marker registration                        | Hold business logic                                                              |
 
 ---
 
@@ -595,28 +601,28 @@ A framework built from this template is ready for production use when all of the
 
 ## 14. Lessons learned: source findings mapped to standards
 
-| Problem observed in the reviewed framework | Prevented by |
-|---|---|
-| CLI environment validated, then silently overridden by an environment variable; secrets derived from a different source | CFG-1, CFG-2, CFG-3, CFG-4 |
-| `os.environ.get("FLAG", False)` treated `"false"` as enabled | CFG-5 |
-| Unused integrations still required their secrets, and a missing local env file crashed import | CFG-6, REP-5 |
-| Request code mutated the client's default headers, so overrides leaked into later requests | HTTP-1, FIX-2 |
-| Blanket 25-attempt / 300 s retry, including business errors, with global delay state in `os.environ` | HTTP-4, CODE-8, REP-6 |
-| Validation caught the wrong exception type and ran before retry classification | HTTP-5, HTTP-6, QA-2 |
-| Network call with no timeout inside a client constructor | HTTP-2, CODE-7, FIX-9 |
-| `@abstractmethod` without `ABC`, so teardown called an empty stub | CODE-4 |
-| Five-way multiple inheritance "god" client; assertions embedded in client methods via boolean flags | CODE-5, HTTP-7, TST-5, CODE-11 |
-| `thing`/`func_thing` fixture twins, with copy-paste wiring to the wrong scoped dependency | FIX-6, FIX-7, QA-2 |
-| Dynamic session scope with function-scoped dependencies (`ScopeMismatch`) | FIX-1, FIX-10 |
-| Several login fixtures re-authenticated one shared client; parameter dicts mutated in place; test data held in a mutable module | FIX-2, FIX-3, DATA-1 |
-| Resources created before `try`; asserts in teardown; created users never deleted | FIX-4, FIX-5, TST-4 |
-| Custom logger singleton whose buffered logs were never emitted | LOG-1, LOG-2 |
-| Shared debug file truncated and appended by parallel processes; backslash paths broken on POSIX | LOG-6, CODE-9 |
-| `report.nodeid` overwritten with docstrings | REP-3, CODE-12 |
-| Two JSON report plugins with incompatible structures | REP-2 |
-| Custom folder runner: wrong "run last" path, exit codes ignored, success reported when a shard produced no report | PAR-1, PAR-2, PAR-4, REP-1 |
-| 101 hard sleeps (up to 15 min); IMAP re-login every 0.1 s | TST-8, TST-9, TST-12 |
-| 160 skips (many "TBD"), unregistered markers, one marker per ticket | TST-2, TST-10, TST-11 |
-| Framework importing from tests; legacy and new API layers coexisting; wildcard imports; `sys.path` hacks | ARCH-1 to ARCH-4 |
-| Duplicated or unpinned requirements, missing direct dependencies, no lint, type, or self-tests | QA-1 to QA-4 |
-| (Lab, preventive) Unchecked SCPI errors, open sessions, sleeps for settling, shared instruments in parallel runs | LAB-1 to LAB-12, PAR-5 |
+| Problem observed in the reviewed framework                                                                                      | Prevented by                   |
+|:--------------------------------------------------------------------------------------------------------------------------------|:-------------------------------|
+| CLI environment validated, then silently overridden by an environment variable; secrets derived from a different source         | CFG-1, CFG-2, CFG-3, CFG-4     |
+| `os.environ.get("FLAG", False)` treated `"false"` as enabled                                                                    | CFG-5                          |
+| Unused integrations still required their secrets, and a missing local env file crashed import                                   | CFG-6, REP-5                   |
+| Request code mutated the client's default headers, so overrides leaked into later requests                                      | HTTP-1, FIX-2                  |
+| Blanket 25-attempt / 300 s retry, including business errors, with global delay state in `os.environ`                            | HTTP-4, CODE-8, REP-6          |
+| Validation caught the wrong exception type and ran before retry classification                                                  | HTTP-5, HTTP-6, QA-2           |
+| Network call with no timeout inside a client constructor                                                                        | HTTP-2, CODE-7, FIX-9          |
+| `@abstractmethod` without `ABC`, so teardown called an empty stub                                                               | CODE-4                         |
+| Five-way multiple inheritance "god" client; assertions embedded in client methods via boolean flags                             | CODE-5, HTTP-7, TST-5, CODE-11 |
+| `thing`/`func_thing` fixture twins, with copy-paste wiring to the wrong scoped dependency                                       | FIX-6, FIX-7, QA-2             |
+| Dynamic session scope with function-scoped dependencies (`ScopeMismatch`)                                                       | FIX-1, FIX-10                  |
+| Several login fixtures re-authenticated one shared client; parameter dicts mutated in place; test data held in a mutable module | FIX-2, FIX-3, DATA-1           |
+| Resources created before `try`; asserts in teardown; created users never deleted                                                | FIX-4, FIX-5, TST-4            |
+| Custom logger singleton whose buffered logs were never emitted                                                                  | LOG-1, LOG-2                   |
+| Shared debug file truncated and appended by parallel processes; backslash paths broken on POSIX                                 | LOG-6, CODE-9                  |
+| `report.nodeid` overwritten with docstrings                                                                                     | REP-3, CODE-12                 |
+| Two JSON report plugins with incompatible structures                                                                            | REP-2                          |
+| Custom folder runner: wrong "run last" path, exit codes ignored, success reported when a shard produced no report               | PAR-1, PAR-2, PAR-4, REP-1     |
+| 101 hard sleeps (up to 15 min); IMAP re-login every 0.1 s                                                                       | TST-8, TST-9, TST-12           |
+| 160 skips (many "TBD"), unregistered markers, one marker per ticket                                                             | TST-2, TST-10, TST-11          |
+| Framework importing from tests; legacy and new API layers coexisting; wildcard imports; `sys.path` hacks                        | ARCH-1 to ARCH-4               |
+| Duplicated or unpinned requirements, missing direct dependencies, no lint, type, or self-tests                                  | QA-1 to QA-4                   |
+| (Lab, preventive) Unchecked SCPI errors, open sessions, sleeps for settling, shared instruments in parallel runs                | LAB-1 to LAB-12, PAR-5         |
