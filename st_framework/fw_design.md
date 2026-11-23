@@ -1,10 +1,15 @@
-## Furniture design
+# Framework design
 
 - Env is python, pytest, visa, py-visa, pyserial, pyvisa-sim (device simulator)
 - reporting is with quarto, pytest-html, (suggest additional)
 - data sourcing would be through excel document
 - logging needs to be fully covered since it is one of the crucial components of the framework.
 results and debug is dove through gathered logs and logs parsing
+
+<br/>
+
+
+
 
 # Hardware / Instrument Integration
 
@@ -23,13 +28,10 @@ The framework should support:
 
 
 
-
-
-
-
 # Claude Code Prompt: Test Automation Framework Analysis
 
 Analyze the existing test automation framework and generate a Markdown report named `snd_report.md` in the project root.
+
 
 ## Areas to Analyze
 
@@ -61,6 +63,8 @@ Analyze the existing test automation framework and generate a Markdown report na
 7. **Other relevant findings**
    - Identify additional issues or improvement opportunities not explicitly listed above.
 
+
+
 ## Framework Maturity Assessment
 
 Evaluate the overall maturity of the framework using a scale from Level 1 to Level 5:
@@ -73,6 +77,8 @@ Evaluate the overall maturity of the framework using a scale from Level 1 to Lev
 
 Explain the assigned level using evidence from the codebase. Highlight the framework's strengths, weaknesses, and the main factors limiting its maturity.
 
+
+
 ## Findings and Recommendations
 
 For each significant issue, include:
@@ -84,6 +90,8 @@ For each significant issue, include:
 - A concrete recommendation for improvement.
 
 Distinguish confirmed defects from potential risks and optional improvements. Prioritize recommendations by importance.
+
+
 
 ## Report Structure
 
@@ -100,6 +108,8 @@ Generate `snd_report.md` with these sections:
 9. Prioritized recommendations.
 10. Conclusion.
 
+
+
 ## Instructions
 
 - Inspect the actual codebase before drawing conclusions.
@@ -115,26 +125,27 @@ Generate `snd_report.md` with these sections:
 
 
 
-
-
 ## Refine prompt and create template
-from 'snd_report.md' generate document that would be the base template for the future projects.
+From `snd_report.md` generate document that would be the base template for the future projects.
 Disregard the part related to selenium/webdriver handling.
 Im gonna use new fremwork without this two components.
 
-Using the analysis in snd_report.md, create a reusable test automation framework template document that will serve as the architectural and implementation baseline for future projects.
+Using the analysis in snd_report.md, create a reusable test automation framework template document that will serve as the architectural
+and implementation baseline for future projects.
 
 Requirements:
-Extract the most valuable architectural decisions, coding practices, configuration patterns, fixture design, logging, reporting, and error-handling recommendations from snd_report.md.
-Convert the findings into practical guidelines and standards for a new framework, rather than simply summarizing the analysis.
-Exclude all Selenium and WebDriver-related components, concepts, dependencies, and recommendations. The new framework will not use either technology.
-Retain recommendations that are applicable to general Python test automation, pytest, PyVISA, SCPI communication, and laboratory equipment automation, where relevant.
-Define recommended project structure, responsibilities of major modules, configuration and parameter passing, fixture lifecycle, resource management, logging, reporting, and coding conventions.
-Clearly distinguish mandatory standards from optional recommendations.
-Include concise Python examples or configuration snippets only where they clarify how a recommended pattern should be implemented.
-Address the weaknesses identified in snd_report.md by establishing practices that help prevent similar problems in future projects.
+- Extract the most valuable architectural decisions, coding practices, configuration patterns, fixture design, logging, reporting, and error-handling recommendations from snd_report.md.
+- Convert the findings into practical guidelines and standards for a new framework, rather than simply summarizing the analysis.
+- Exclude all Selenium and WebDriver-related components, concepts, dependencies, and recommendations. The new framework will not use either technology.
+- Retain recommendations that are applicable to general Python test automation, pytest, PyVISA, SCPI communication, and laboratory equipment automation, where relevant.
+- Define recommended project structure, responsibilities of major modules, configuration and parameter passing, fixture lifecycle, resource management, logging, reporting, and coding conventions.
+- Clearly distinguish mandatory standards from optional recommendations.
+- Include concise Python examples or configuration snippets only where they clarify how a recommended pattern should be implemented.
+- Address the weaknesses identified in snd_report.md by establishing practices that help prevent similar problems in future projects.
 
 Output:
-Generate a Markdown document named framework_template.md in the project root.
-The document should be practical, technology-appropriate, reusable across future projects, and detailed enough to guide framework implementation without being tied to the original project's specific classes, modules, or configuration.
-Do not modify existing source code or snd_report.md. Use the analysis report as the primary source, applying engineering judgment where necessary.
+- Generate a Markdown document named framework_template.md in the project root.
+- The document should be practical, technology-appropriate, reusable across future projects, and detailed enough to guide framework implementation without being tied to the original project's specific classes, modules, or configuration.
+- Do not modify existing source code or snd_report.md. Use the analysis report as the primary source, applying engineering judgment where necessary.
+
+
